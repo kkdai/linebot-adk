@@ -1,0 +1,7 @@
+line-bot-sdk==3.14.0
+fastapi
+uvicorn[standard]
+google-adk
+pydantic
+tiktoken
+Pillow
