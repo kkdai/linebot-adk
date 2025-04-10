@@ -1,4 +1,4 @@
-# LINE Bot with OpenAI Agent and Google Gemini
+# LINE Bot with Google ADK (Agent SDK) and Google Gemini
 
 ## Project Background
 
