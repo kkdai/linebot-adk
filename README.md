@@ -2,16 +2,15 @@
 
 ## Project Background
 
-This project is a LINE bot that uses both OpenAI Agent functionality and Google Gemini models to generate responses to text inputs. The bot can answer questions in Traditional Chinese and provide helpful information.
+This project is a LINE bot that uses Google ADK (Agent SDK) and Google Gemini models to generate responses to text inputs. The bot can answer questions in Traditional Chinese and provide helpful information.
 
 ## Screenshot
 
 ![image](https://github.com/user-attachments/assets/2bcbd827-0047-4a3a-8645-f8075d996c10)
 
-
 ## Features
 
-- Text message processing using AI models (OpenAI or Google Gemini)
+- Text message processing using AI models (Google ADK or Google Gemini)
 - Support for function calling with custom tools
 - Integration with LINE Messaging API
 - Built with FastAPI for high-performance async processing
@@ -22,7 +21,8 @@ This project is a LINE bot that uses both OpenAI Agent functionality and Google 
 - Python 3.9+
 - FastAPI
 - LINE Messaging API
-- OpenAI API / Google Gemini API
+- Google ADK (Agent SDK)
+- Google Gemini API
 - Docker
 - Google Cloud Run (for deployment)
 
@@ -32,7 +32,7 @@ This project is a LINE bot that uses both OpenAI Agent functionality and Google 
 2. Set the following environment variables:
    - `ChannelSecret`: Your LINE channel secret
    - `ChannelAccessToken`: Your LINE channel access token
-   - `GEMINI_API_KEY`: Your Google Gemini API key (if using Gemini)
+   - `GEMINI_API_KEY`: Your Google Gemini API key
 
 3. Install the required dependencies:
 
@@ -78,12 +78,12 @@ ngrok http 8000
 You can use the included Dockerfile to build and deploy the application:
 
 ```
-docker build -t linebot-ai .
+docker build -t linebot-adk .
 docker run -p 8000:8000 \
   -e ChannelSecret=YOUR_SECRET \
   -e ChannelAccessToken=YOUR_TOKEN \
   -e GEMINI_API_KEY=YOUR_GEMINI_KEY \
-  linebot-ai
+  linebot-adk
 ```
 
 ### Google Cloud Deployment
@@ -113,14 +113,14 @@ docker run -p 8000:8000 \
 3. Build and push the Docker image to Google Container Registry:
 
    ```
-   gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/linebot-ai
+   gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/linebot-adk
    ```
 
 4. Deploy to Cloud Run:
 
    ```
-   gcloud run deploy linebot-ai \
-     --image gcr.io/YOUR_PROJECT_ID/linebot-ai \
+   gcloud run deploy linebot-adk \
+     --image gcr.io/YOUR_PROJECT_ID/linebot-adk \
      --platform managed \
      --region asia-east1 \
      --allow-unauthenticated \
@@ -132,7 +132,7 @@ docker run -p 8000:8000 \
 5. Get the service URL:
 
    ```
-   gcloud run services describe linebot-ai --platform managed --region asia-east1 --format 'value(status.url)'
+   gcloud run services describe linebot-adk --platform managed --region asia-east1 --format 'value(status.url)'
    ```
 
 6. Set the service URL as your LINE Bot webhook URL in the LINE Developer Console.
@@ -146,7 +146,6 @@ For better security, store your API keys as secrets:
    ```
    echo -n "YOUR_SECRET" | gcloud secrets create line-channel-secret --data-file=-
    echo -n "YOUR_TOKEN" | gcloud secrets create line-channel-token --data-file=-
-   echo -n "YOUR_OPENAI_KEY" | gcloud secrets create openai-api-key --data-file=-
    echo -n "YOUR_GEMINI_KEY" | gcloud secrets create gemini-api-key --data-file=-
    ```
 
@@ -155,26 +154,24 @@ For better security, store your API keys as secrets:
    ```
    gcloud secrets add-iam-policy-binding line-channel-secret --member=serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com --role=roles/secretmanager.secretAccessor
    gcloud secrets add-iam-policy-binding line-channel-token --member=serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com --role=roles/secretmanager.secretAccessor
-   gcloud secrets add-iam-policy-binding openai-api-key --member=serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com --role=roles/secretmanager.secretAccessor
    gcloud secrets add-iam-policy-binding gemini-api-key --member=serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com --role=roles/secretmanager.secretAccessor
    ```
 
 3. Deploy with secrets:
 
    ```
-   gcloud run deploy linebot-ai \
-     --image gcr.io/YOUR_PROJECT_ID/linebot-ai \
+   gcloud run deploy linebot-adk \
+     --image gcr.io/YOUR_PROJECT_ID/linebot-adk \
      --platform managed \
      --region asia-east1 \
      --allow-unauthenticated \
-     --set-env-vars MODEL_PROVIDER=openai,MODEL_NAME=gpt-4 \
-     --update-secrets=ChannelSecret=line-channel-secret:latest,ChannelAccessToken=line-channel-token:latest,OPENAI_API_KEY=openai-api-key:latest,GEMINI_API_KEY=gemini-api-key:latest
+     --update-secrets=ChannelSecret=line-channel-secret:latest,ChannelAccessToken=line-channel-token:latest,GEMINI_API_KEY=gemini-api-key:latest
    ```
 
 ## Maintenance and Monitoring
 
 After deployment, you can monitor your service through the Google Cloud Console:
 
-1. View logs: `gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=linebot-ai"`
+1. View logs: `gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=linebot-adk"`
 2. Check service metrics: Access the Cloud Run dashboard in Google Cloud Console
 3. Set up alerts for error rates or high latency in Cloud Monitoring
