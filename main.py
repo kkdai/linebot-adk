@@ -120,7 +120,7 @@ async def handle_callback(request: Request):
             print(f"Received message: {msg} from user: {user_id}")
 
             # Use the user's prompt directly with the agent
-            response = await call_agent_async(msg)
+            response = await call_agent_async(msg, user_id)
             reply_msg = TextSendMessage(text=response)
             await line_bot_api.reply_message(
                 event.reply_token,
@@ -134,7 +134,7 @@ async def handle_callback(request: Request):
     return 'OK'
 
 
-async def call_agent_async(query: str):
+async def call_agent_async(query: str, user_id: str) -> str:
     """Sends a query to the agent and prints the final response."""
     print(f"\n>>> User Query: {query}")
 
@@ -145,7 +145,7 @@ async def call_agent_async(query: str):
 
     # Key Concept: run_async executes the agent logic and yields Events.
     # We iterate through events to find the final answer.
-    async for event in runner.run_async(user_id=USER_ID, session_id=SESSION_ID, new_message=content):
+    async for event in runner.run_async(user_id=user_id, session_id=SESSION_ID, new_message=content):
         # You can uncomment the line below to see *all* events during execution
         # print(f"  [Event] Author: {event.author}, Type: {type(event).__name__}, Final: {event.is_final_response()}, Content: {event.content}")
 
