@@ -18,7 +18,7 @@ from multi_tool_agent.agent import (
 from google.adk.agents import Agent
 
 # Import necessary session components
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import InMemorySessionService, Session
 from google.adk.runners import Runner
 from google.genai import types
 
@@ -83,11 +83,12 @@ active_sessions = {}
 # Create a function to get or create a session for a user
 
 
-def get_or_create_session(user_id):
+async def get_or_create_session(user_id):  # Make function async
     if user_id not in active_sessions:
         # Create a new session for this user
         session_id = f"session_{user_id}"
-        session = session_service.create_session(
+        # Add await for the async session creation
+        await session_service.create_session(
             app_name=APP_NAME, user_id=user_id, session_id=session_id
         )
         active_sessions[user_id] = session_id
@@ -153,7 +154,7 @@ async def call_agent_async(query: str, user_id: str) -> str:
     print(f"\n>>> User Query: {query}")
 
     # Get or create a session for this user
-    session_id = get_or_create_session(user_id)
+    session_id = await get_or_create_session(user_id)  # Add await
 
     # Prepare the user's message in ADK format
     content = types.Content(role="user", parts=[types.Part(text=query)])
@@ -186,7 +187,9 @@ async def call_agent_async(query: str, user_id: str) -> str:
         # Recreate session if it was lost
         if "Session not found" in str(e):
             active_sessions.pop(user_id, None)  # Remove the invalid session
-            session_id = get_or_create_session(user_id)  # Create a new one
+            session_id = await get_or_create_session(
+                user_id
+            )  # Create a new one # Add await
             # Try again with the new session
             try:
                 async for event in runner.run_async(
