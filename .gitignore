@@ -1,3 +1,6 @@
 .DS_Store
-__pycache__/main.cpython-310.pyc
+__pycache__/
+*.pyc
+.pytest_cache/
 .vscode/settings.json
+.env

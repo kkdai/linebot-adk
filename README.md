@@ -1,177 +1,128 @@
-# LINE Bot with Google ADK (Agent SDK) and Google Gemini
+# 血壓提醒 LINE Bot（Blood Pressure Reminder）
 
-## Project Background
+提醒長輩每天量血壓的 LINE Bot，基於 FastAPI + Google ADK/Gemini，部署於 GCP Cloud Run，資料存於 Firestore。
 
-This project is a LINE bot that uses Google ADK (Agent SDK) and Google Gemini models to generate responses to text inputs. The bot can answer questions in Traditional Chinese and provide helpful information.
+## 功能
 
-## Screenshot
+1. **每日提醒**：每天早上 11:00（Asia/Taipei）提醒長輩量血壓；若當日已輸入則跳過。
+2. **血壓輸入**：可用文字（例如 `120/80`、`收縮壓120 舒張壓80 脈搏70`）或直接拍血壓計照片，由 Gemini 辨識數字。
+3. **未量測通知**：每天 14:00 檢查，若長輩當日仍無紀錄，主動通知綁定的家屬。
+4. **自動建議**：每次輸入血壓會依規則分級（正常／偏高／一期／二期／危象）並由 Gemini 用溫暖口吻給建議；達高血壓危象會提醒立即休息並就醫。
+5. **家庭綁定**：家屬輸入「我是親屬」取得 6 位數配對碼，長輩輸入該碼即完成綁定（一位長輩可對應多位家屬）。
+6. **查詢紀錄**：輸入「查血壓」查看最近 7 天紀錄。
 
-![image](https://github.com/user-attachments/assets/2bcbd827-0047-4a3a-8645-f8075d996c10)
+## 使用方式（LINE 對話）
 
-## Features
+| 角色 | 指令 | 說明 |
+|------|------|------|
+| 家屬 | `我是親屬` | 取得 6 位數配對碼（30 分鐘有效） |
+| 長輩 | `我是長輩` | 標記為長輩並提示輸入配對碼 |
+| 長輩 | `123456` | 輸入家屬給的配對碼完成綁定 |
+| 長輩 | `120/80` 或傳照片 | 記錄血壓並取得建議 |
+| 任一 | `查血壓` | 查看最近紀錄 |
+| 任一 | `說明` | 顯示使用說明 |
 
-- Text message processing using AI models (Google ADK or Google Gemini)
-- Support for function calling with custom tools
-- Integration with LINE Messaging API
-- Built with FastAPI for high-performance async processing
-- Containerized with Docker for easy deployment
-
-## Technologies Used
-
-- Python 3.9+
-- FastAPI
-- LINE Messaging API
-- Google ADK (Agent SDK)
-- Google Gemini API
-- Docker
-- Google Cloud Run (for deployment)
-
-## Setup
-
-1. Clone the repository to your local machine.
-2. Set the following environment variables:
-   - `ChannelSecret`: Your LINE channel secret
-   - `ChannelAccessToken`: Your LINE channel access token
-   - `GEMINI_API_KEY`: Your Google Gemini API key
-
-3. Install the required dependencies:
-
-   ```
-   pip install -r requirements.txt
-   ```
-
-4. Start the FastAPI server:
-
-   ```
-   uvicorn main:app --reload
-   ```
-
-5. Set up your LINE bot webhook URL to point to your server's endpoint.
-
-## Usage
-
-### Text Processing
-
-Send any text message to the LINE bot, and it will use the configured AI model to generate a response. The bot is optimized for Traditional Chinese responses.
-
-### Available Tools
-
-The bot can be configured with various function tools such as:
-
-- Weather information retrieval
-- Translation services
-- Data lookup capabilities
-- Custom tools based on your specific needs
-
-## Deployment Options
-
-### Local Development
-
-Use ngrok or similar tools to expose your local server to the internet for webhook access:
+## 架構
 
 ```
-ngrok http 8000
+main.py             FastAPI：webhook + 排程 endpoint + 組裝
+router.py           訊息路由（註冊綁定／血壓文字／查詢／對話 fallthrough）
+firestore_store.py  Firestore 資料存取
+registration.py     配對碼產生與綁定
+bp_parser.py        文字血壓解析
+bp_image.py         Gemini 圖片 OCR
+bp_advice.py        規則分級 + LLM 潤飾
+tasks.py            每日提醒／未量測通知邏輯
+tests/              pytest（mock Firestore/LINE/Gemini）
 ```
 
-### Docker Deployment
+設計文件：`docs/superpowers/specs/2026-06-14-blood-pressure-reminder-design.md`
 
-You can use the included Dockerfile to build and deploy the application:
+## 環境變數
 
+| 變數 | 說明 |
+|------|------|
+| `ChannelSecret` | LINE channel secret |
+| `ChannelAccessToken` | LINE channel access token |
+| `GOOGLE_API_KEY` | Gemini API key（或改用 Vertex，見下） |
+| `TasksToken` | 保護排程 endpoint 的共享密鑰 |
+| `GOOGLE_GENAI_USE_VERTEXAI` | 設為 `True` 改用 Vertex AI（需 `GOOGLE_CLOUD_PROJECT`、`GOOGLE_CLOUD_LOCATION`） |
+
+## 本機測試
+
+```bash
+pip install -r requirements.txt
+pytest -q
 ```
-docker build -t linebot-adk .
-docker run -p 8000:8000 \
-  -e ChannelSecret=YOUR_SECRET \
-  -e ChannelAccessToken=YOUR_TOKEN \
-  -e GEMINI_API_KEY=YOUR_GEMINI_KEY \
-  linebot-adk
+
+## 部署到 Cloud Run
+
+### 1. 啟用 API 與 Firestore
+
+```bash
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
+  firestore.googleapis.com cloudscheduler.googleapis.com secretmanager.googleapis.com
+
+# 建立 Firestore（Native 模式，亞洲區）
+gcloud firestore databases create --location=asia-east1
 ```
 
-### Google Cloud Deployment
+### 2. 建立 Secret
 
-#### Prerequisites
+```bash
+echo -n "YOUR_LINE_SECRET"  | gcloud secrets create line-channel-secret --data-file=-
+echo -n "YOUR_LINE_TOKEN"   | gcloud secrets create line-channel-token  --data-file=-
+echo -n "YOUR_GEMINI_KEY"   | gcloud secrets create gemini-api-key      --data-file=-
+echo -n "$(openssl rand -hex 16)" | gcloud secrets create tasks-token   --data-file=-
+```
 
-1. Install the [Google Cloud SDK](https://cloud.google.com/sdk/docs/install)
-2. Create a Google Cloud project and enable the following APIs:
-   - Cloud Run API
-   - Container Registry API or Artifact Registry API
-   - Cloud Build API
+### 3. 建置與部署
 
-#### Steps for Deployment
+```bash
+gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/linebot-bp
 
-1. Authenticate with Google Cloud:
+gcloud run deploy linebot-bp \
+  --image gcr.io/YOUR_PROJECT_ID/linebot-bp \
+  --platform managed --region asia-east1 --allow-unauthenticated \
+  --update-secrets=ChannelSecret=line-channel-secret:latest,ChannelAccessToken=line-channel-token:latest,GOOGLE_API_KEY=gemini-api-key:latest,TasksToken=tasks-token:latest
+```
 
-   ```
-   gcloud auth login
-   ```
+Cloud Run 的服務帳號需有 Firestore 權限：
 
-2. Set your Google Cloud project:
+```bash
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+  --member=serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com \
+  --role=roles/datastore.user
+```
 
-   ```
-   gcloud config set project YOUR_PROJECT_ID
-   ```
+取得服務網址並設為 LINE webhook（指向 `/`）：
 
-3. Build and push the Docker image to Google Container Registry:
+```bash
+gcloud run services describe linebot-bp --region asia-east1 --format 'value(status.url)'
+```
 
-   ```
-   gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/linebot-adk
-   ```
+### 4. 建立 Cloud Scheduler 排程
 
-4. Deploy to Cloud Run:
+把 `SERVICE_URL` 換成上一步的網址，`TASKS_TOKEN` 換成你存進 secret 的值：
 
-   ```
-   gcloud run deploy linebot-adk \
-     --image gcr.io/YOUR_PROJECT_ID/linebot-adk \
-     --platform managed \
-     --region asia-east1 \
-     --allow-unauthenticated \
-     --set-env-vars ChannelSecret=YOUR_SECRET,ChannelAccessToken=YOUR_TOKEN,GEMINI_API_KEY=YOUR_GEMINI_KEY
-   ```
+```bash
+# 每天 11:00 提醒長輩
+gcloud scheduler jobs create http bp-morning-reminder \
+  --schedule="0 11 * * *" --time-zone="Asia/Taipei" \
+  --uri="SERVICE_URL/tasks/morning-reminder" --http-method=POST \
+  --headers="X-Tasks-Token=TASKS_TOKEN" --location=asia-east1
 
-   Note: For production, it's recommended to use Secret Manager for storing sensitive environment variables.
+# 每天 14:00 檢查未量測並通知家屬
+gcloud scheduler jobs create http bp-escalation-check \
+  --schedule="0 14 * * *" --time-zone="Asia/Taipei" \
+  --uri="SERVICE_URL/tasks/escalation-check" --http-method=POST \
+  --headers="X-Tasks-Token=TASKS_TOKEN" --location=asia-east1
+```
 
-5. Get the service URL:
+## 健康檢查
 
-   ```
-   gcloud run services describe linebot-adk --platform managed --region asia-east1 --format 'value(status.url)'
-   ```
+`GET /healthz` 回傳 `{"status":"ok"}`。
 
-6. Set the service URL as your LINE Bot webhook URL in the LINE Developer Console.
+## 注意事項
 
-#### Setting Up Secrets in Google Cloud (Recommended)
-
-For better security, store your API keys as secrets:
-
-1. Create secrets for your sensitive values:
-
-   ```
-   echo -n "YOUR_SECRET" | gcloud secrets create line-channel-secret --data-file=-
-   echo -n "YOUR_TOKEN" | gcloud secrets create line-channel-token --data-file=-
-   echo -n "YOUR_GEMINI_KEY" | gcloud secrets create gemini-api-key --data-file=-
-   ```
-
-2. Give the Cloud Run service access to these secrets:
-
-   ```
-   gcloud secrets add-iam-policy-binding line-channel-secret --member=serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com --role=roles/secretmanager.secretAccessor
-   gcloud secrets add-iam-policy-binding line-channel-token --member=serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com --role=roles/secretmanager.secretAccessor
-   gcloud secrets add-iam-policy-binding gemini-api-key --member=serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com --role=roles/secretmanager.secretAccessor
-   ```
-
-3. Deploy with secrets:
-
-   ```
-   gcloud run deploy linebot-adk \
-     --image gcr.io/YOUR_PROJECT_ID/linebot-adk \
-     --platform managed \
-     --region asia-east1 \
-     --allow-unauthenticated \
-     --update-secrets=ChannelSecret=line-channel-secret:latest,ChannelAccessToken=line-channel-token:latest,GEMINI_API_KEY=gemini-api-key:latest
-   ```
-
-## Maintenance and Monitoring
-
-After deployment, you can monitor your service through the Google Cloud Console:
-
-1. View logs: `gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=linebot-adk"`
-2. Check service metrics: Access the Cloud Run dashboard in Google Cloud Console
-3. Set up alerts for error rates or high latency in Cloud Monitoring
+血壓分級與建議僅供一般健康參考，不構成醫療診斷；如有不適請就醫。

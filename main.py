@@ -1,126 +1,135 @@
 import os
 import sys
-import asyncio
-from io import BytesIO
+import datetime
+from zoneinfo import ZoneInfo
+
+from contextlib import asynccontextmanager
 
 import aiohttp
-from fastapi import Request, FastAPI, HTTPException
-from zoneinfo import ZoneInfo
+from fastapi import Request, FastAPI, HTTPException, Header
 
 from linebot.models import MessageEvent, TextSendMessage
 from linebot.exceptions import InvalidSignatureError
 from linebot.aiohttp_async_http_client import AiohttpAsyncHttpClient
 from linebot import AsyncLineBotApi, WebhookParser
-from multi_tool_agent.agent import (
-    get_weather,
-    get_current_time,
-)
-from google.adk.agents import Agent
 
-# Import necessary session components
-from google.adk.sessions import InMemorySessionService, Session
+from google.adk.agents import Agent
+from google.adk.sessions import InMemorySessionService
 from google.adk.runners import Runner
 from google.genai import types
 
-# OpenAI Agent configuration
+import bp_advice
+import router
+import tasks as task_jobs
+from bp_image import extract_bp_from_image
+from firestore_store import default_store
+
+# --- Configuration -------------------------------------------------------
 USE_VERTEX = os.getenv("GOOGLE_GENAI_USE_VERTEXAI") or "FALSE"
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or ""
 
-# LINE Bot configuration
 channel_secret = os.getenv("ChannelSecret", None)
 channel_access_token = os.getenv("ChannelAccessToken", None)
+TASKS_TOKEN = os.getenv("TasksToken", None)
+TZ = ZoneInfo("Asia/Taipei")
 
-# Validate environment variables
 if channel_secret is None:
     print("Specify ChannelSecret as environment variable.")
     sys.exit(1)
 if channel_access_token is None:
     print("Specify ChannelAccessToken as environment variable.")
     sys.exit(1)
-if USE_VERTEX == "True":  # Check if USE_VERTEX is true as a string
+if USE_VERTEX == "True":
     GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT")
     GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION")
     if not GOOGLE_CLOUD_PROJECT:
-        raise ValueError(
-            "Please set GOOGLE_CLOUD_PROJECT via env var or code when USE_VERTEX is true."
-        )
+        raise ValueError("Please set GOOGLE_CLOUD_PROJECT when USE_VERTEX is true.")
     if not GOOGLE_CLOUD_LOCATION:
-        raise ValueError(
-            "Please set GOOGLE_CLOUD_LOCATION via env var or code when USE_VERTEX is true."
-        )
+        raise ValueError("Please set GOOGLE_CLOUD_LOCATION when USE_VERTEX is true.")
 elif not GOOGLE_API_KEY:
     raise ValueError("Please set GOOGLE_API_KEY via env var or code.")
 
-# Initialize the FastAPI app for LINEBot
-app = FastAPI()
-session = aiohttp.ClientSession()
-async_http_client = AiohttpAsyncHttpClient(session)
-line_bot_api = AsyncLineBotApi(channel_access_token, async_http_client)
+# --- App & clients -------------------------------------------------------
+# The aiohttp session must be created inside a running event loop, so the LINE
+# client is initialised on startup via the lifespan handler below.
+line_bot_api: AsyncLineBotApi | None = None
+_http_session: aiohttp.ClientSession | None = None
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global line_bot_api, _http_session
+    _http_session = aiohttp.ClientSession()
+    line_bot_api = AsyncLineBotApi(
+        channel_access_token, AiohttpAsyncHttpClient(_http_session)
+    )
+    try:
+        yield
+    finally:
+        await _http_session.close()
+
+
+app = FastAPI(lifespan=lifespan)
 parser = WebhookParser(channel_secret)
+store = default_store()
 
-# Initialize ADK client
+# --- Conversational agent (fall-through for non-BP chat) -----------------
 root_agent = Agent(
-    name="weather_time_agent",
+    name="health_companion_agent",
     model="gemini-2.5-flash",
-    description=("Agent to answer questions about the time and weather in a city."),
-    instruction=("I can answer your questions about the time and weather in a city."),
-    tools=[get_weather, get_current_time],
+    description="A warm health companion for elders.",
+    instruction=(
+        "你是一位親切、有耐心的長輩健康小幫手，請用溫暖、簡單、易懂的繁體中文回覆。"
+        "若使用者談到身體不適或血壓問題，給予一般性的關心與提醒，並建議必要時就醫，"
+        "但不要提供醫療診斷。回覆請簡短、口語化。"
+    ),
+    tools=[],
 )
-print(f"Agent '{root_agent.name}' created.")
-
-# --- Session Management ---
-# Key Concept: SessionService stores conversation history & state.
-# InMemorySessionService is simple, non-persistent storage for this tutorial.
 session_service = InMemorySessionService()
-
-# Define constants for identifying the interaction context
-APP_NAME = "linebot_adk_app"
-# Instead of fixed user_id and session_id, we'll now manage them dynamically
-
-# Dictionary to track active sessions
+APP_NAME = "linebot_bp_app"
 active_sessions = {}
-
-# Create a function to get or create a session for a user
-
-
-async def get_or_create_session(user_id):  # Make function async
-    if user_id not in active_sessions:
-        # Create a new session for this user
-        session_id = f"session_{user_id}"
-        # Add await for the async session creation
-        await session_service.create_session(
-            app_name=APP_NAME, user_id=user_id, session_id=session_id
-        )
-        active_sessions[user_id] = session_id
-        print(
-            f"New session created: App='{APP_NAME}', User='{user_id}', Session='{session_id}'"
-        )
-    else:
-        # Use existing session
-        session_id = active_sessions[user_id]
-        print(
-            f"Using existing session: App='{APP_NAME}', User='{user_id}', Session='{session_id}'"
-        )
-
-    return session_id
+runner = Runner(agent=root_agent, app_name=APP_NAME, session_service=session_service)
 
 
-# Key Concept: Runner orchestrates the agent execution loop.
-runner = Runner(
-    agent=root_agent,  # The agent we want to run
-    app_name=APP_NAME,  # Associates runs with our app
-    session_service=session_service,  # Uses our session manager
-)
-print(f"Runner created for agent '{runner.agent.name}'.")
+def today_str() -> str:
+    return datetime.datetime.now(TZ).strftime("%Y-%m-%d")
 
 
+# --- LLM polish for advice ----------------------------------------------
+def polish_advice(base_text: str, category: bp_advice.Category) -> str:
+    """Rewrite advice in a warm tone via Gemini; fall back to base on error."""
+    from google import genai
+
+    client = genai.Client()
+    prompt = (
+        "請把下面這段血壓建議，改寫成對長輩說話、溫暖親切、簡短口語的繁體中文，"
+        "保留數值與分級的重點，不要新增醫療診斷：\n\n" + base_text
+    )
+    resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+    return resp.text or base_text
+
+
+# --- LINE helpers --------------------------------------------------------
+async def push_text(uid: str, text: str) -> None:
+    try:
+        await line_bot_api.push_message(uid, TextSendMessage(text=text))
+    except Exception as e:  # noqa: BLE001
+        print(f"push_message failed for {uid}: {e}")
+
+
+async def fetch_image_bytes(message_id: str) -> bytes:
+    content = await line_bot_api.get_message_content(message_id)
+    chunks = []
+    async for chunk in content.iter_content():
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+# --- Webhook -------------------------------------------------------------
 @app.post("/")
 async def handle_callback(request: Request):
     signature = request.headers["X-Line-Signature"]
-
-    # get request body as text
-    body = await request.body()
-    body = body.decode()
+    body = (await request.body()).decode()
 
     try:
         events = parser.parse(body, signature)
@@ -130,82 +139,104 @@ async def handle_callback(request: Request):
     for event in events:
         if not isinstance(event, MessageEvent):
             continue
+        user_id = event.source.user_id
 
         if event.message.type == "text":
-            # Process text message
-            msg = event.message.text
-            user_id = event.source.user_id
-            print(f"Received message: {msg} from user: {user_id}")
-
-            # Use the user's prompt directly with the agent
-            response = await call_agent_async(msg, user_id)
-            reply_msg = TextSendMessage(text=response)
-            await line_bot_api.reply_message(event.reply_token, reply_msg)
+            reply = await router.handle_text_message(
+                store,
+                user_id,
+                event.message.text,
+                today_str(),
+                polish=polish_advice,
+                agent_reply=call_agent_async,
+            )
+            await line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         elif event.message.type == "image":
-            return "OK"
+            reply = await handle_image_message(event.message.id, user_id)
+            await line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         else:
             continue
 
     return "OK"
 
 
-async def call_agent_async(query: str, user_id: str) -> str:
-    """Sends a query to the agent and prints the final response."""
-    print(f"\n>>> User Query: {query}")
-
-    # Get or create a session for this user
-    session_id = await get_or_create_session(user_id)  # Add await
-
-    # Prepare the user's message in ADK format
-    content = types.Content(role="user", parts=[types.Part(text=query)])
-
-    final_response_text = "Agent did not produce a final response."  # Default
-
+async def handle_image_message(message_id: str, user_id: str) -> str:
     try:
-        # Key Concept: run_async executes the agent logic and yields Events.
-        # We iterate through events to find the final answer.
+        image_bytes = await fetch_image_bytes(message_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"fetch image failed: {e}")
+        return "抱歉，我讀取照片時出了點問題，請再傳一次，或直接輸入血壓數值（例如 120/80）。"
+
+    reading = extract_bp_from_image(image_bytes)
+    if reading is None:
+        return (
+            "我看不太清楚血壓計上的數字 😅 請對準螢幕重拍一張，"
+            "或直接輸入血壓數值（例如 120/80）給我。"
+        )
+    return router.record_and_advise(
+        store, user_id, reading, "image", today_str(), polish=polish_advice
+    )
+
+
+# --- Scheduled task endpoints (Cloud Scheduler) --------------------------
+def _check_tasks_token(token: str | None) -> None:
+    if not TASKS_TOKEN or token != TASKS_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.post("/tasks/morning-reminder")
+async def morning_reminder(x_tasks_token: str | None = Header(default=None)):
+    _check_tasks_token(x_tasks_token)
+    count = await task_jobs.run_morning_reminder(store, today_str(), push_text)
+    return {"reminded": count}
+
+
+@app.post("/tasks/escalation-check")
+async def escalation_check(x_tasks_token: str | None = Header(default=None)):
+    _check_tasks_token(x_tasks_token)
+    sent = await task_jobs.run_escalation_check(store, today_str(), push_text)
+    return {"notified": sent}
+
+
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
+
+# --- Conversational agent runner ----------------------------------------
+async def get_or_create_session(user_id: str) -> str:
+    if user_id not in active_sessions:
+        session_id = f"session_{user_id}"
+        await session_service.create_session(
+            app_name=APP_NAME, user_id=user_id, session_id=session_id
+        )
+        active_sessions[user_id] = session_id
+    return active_sessions[user_id]
+
+
+async def call_agent_async(query: str, user_id: str) -> str:
+    session_id = await get_or_create_session(user_id)
+    content = types.Content(role="user", parts=[types.Part(text=query)])
+    final_response_text = "不好意思，我現在沒辦法回覆，請稍後再試。"
+    try:
         async for event in runner.run_async(
             user_id=user_id, session_id=session_id, new_message=content
         ):
-            # You can uncomment the line below to see *all* events during execution
-            # print(f"  [Event] Author: {event.author}, Type: {type(event).__name__}, Final: {event.is_final_response()}, Content: {event.content}")
-
-            # Key Concept: is_final_response() marks the concluding message for the turn.
             if event.is_final_response():
                 if event.content and event.content.parts:
-                    # Assuming text response in the first part
                     final_response_text = event.content.parts[0].text
-                elif (
-                    event.actions and event.actions.escalate
-                ):  # Handle potential errors/escalations
-                    final_response_text = f"Agent escalated: {event.error_message or 'No specific message.'}"
-                # Add more checks here if needed (e.g., specific error codes)
-                break  # Stop processing events once the final response is found
+                break
     except ValueError as e:
-        # Handle errors, especially session not found
-        print(f"Error processing request: {str(e)}")
-        # Recreate session if it was lost
         if "Session not found" in str(e):
-            active_sessions.pop(user_id, None)  # Remove the invalid session
-            session_id = await get_or_create_session(
-                user_id
-            )  # Create a new one # Add await
-            # Try again with the new session
-            try:
-                async for event in runner.run_async(
-                    user_id=user_id, session_id=session_id, new_message=content
-                ):
-                    # Same event handling code as above
-                    if event.is_final_response():
-                        if event.content and event.content.parts:
-                            final_response_text = event.content.parts[0].text
-                        elif event.actions and event.actions.escalate:
-                            final_response_text = f"Agent escalated: {event.error_message or 'No specific message.'}"
-                        break
-            except Exception as e2:
-                final_response_text = f"Sorry, I encountered an error: {str(e2)}"
+            active_sessions.pop(user_id, None)
+            session_id = await get_or_create_session(user_id)
+            async for event in runner.run_async(
+                user_id=user_id, session_id=session_id, new_message=content
+            ):
+                if event.is_final_response():
+                    if event.content and event.content.parts:
+                        final_response_text = event.content.parts[0].text
+                    break
         else:
-            final_response_text = f"Sorry, I encountered an error: {str(e)}"
-
-    print(f"<<< Agent Response: {final_response_text}")
+            print(f"agent error: {e}")
     return final_response_text
