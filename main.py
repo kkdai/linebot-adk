@@ -128,7 +128,9 @@ async def fetch_image_bytes(message_id: str) -> bytes:
 # --- Webhook -------------------------------------------------------------
 @app.post("/")
 async def handle_callback(request: Request):
-    signature = request.headers["X-Line-Signature"]
+    signature = request.headers.get("X-Line-Signature")
+    if signature is None:
+        raise HTTPException(status_code=400, detail="Missing X-Line-Signature")
     body = (await request.body()).decode()
 
     try:
@@ -198,8 +200,9 @@ async def escalation_check(x_tasks_token: str | None = Header(default=None)):
     return {"notified": sent}
 
 
-@app.get("/healthz")
-async def healthz():
+@app.get("/health")
+async def health():
+    # Note: "/healthz" is reserved/intercepted by Google's front end on Cloud Run.
     return {"status": "ok"}
 
 

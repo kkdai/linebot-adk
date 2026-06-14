@@ -121,7 +121,7 @@ gcloud scheduler jobs create http bp-escalation-check \
 
 ## 健康檢查
 
-`GET /healthz` 回傳 `{"status":"ok"}`。
+`GET /health` 回傳 `{"status":"ok"}`。（注意：`/healthz` 會被 Google 前端攔截，故改用 `/health`。）
 
 ## 注意事項
 

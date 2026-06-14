@@ -30,9 +30,14 @@ def client(monkeypatch):
     return TestClient(main.app), main, Store(fake_db)
 
 
-def test_healthz(client):
+def test_health(client):
     tc, _, _ = client
-    assert tc.get("/healthz").json() == {"status": "ok"}
+    assert tc.get("/health").json() == {"status": "ok"}
+
+
+def test_webhook_missing_signature_returns_400(client):
+    tc, _, _ = client
+    assert tc.post("/", content=b"{}").status_code == 400
 
 
 def test_task_endpoint_requires_token(client):
